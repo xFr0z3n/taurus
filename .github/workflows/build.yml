@@ -28,7 +28,7 @@ on:
         type: choice
         options: [artifacts, filebin, both]
   push:
-    branches: [stable]
+    branches: [main, stable]
     paths-ignore: ["**.md", "docs/**", "*.json", "icons/**"]
   pull_request:
     paths-ignore: ["**.md", "docs/**", "*.json", "icons/**"]
