@@ -187,9 +187,8 @@ static UIButton *glassButton(NSString *title) {
     UIView *strip = [UIView new];
     [strip addSubview:halo];
 
-    BOOL glass = SGRedesignAvailable();
     UILabel *heading = [UILabel new];
-    heading.text = glass ? @"Pick your look." : @"Your look.";
+    heading.text = @"Pick your look.";
     heading.font = [UIFont systemFontOfSize:30 weight:UIFontWeightBold];
     heading.textColor = UIColor.whiteColor;
     heading.numberOfLines = 0;
@@ -198,13 +197,9 @@ static UIButton *glassButton(NSString *title) {
     _legacy = [[SGLookCard alloc] initWithSymbol:@"slider.horizontal.3" title:@"Legacy" subtitle:@"More options, still looks like Spotify."];
     for (SGLookCard *card in @[_redesigned, _legacy]) [card addTarget:self action:@selector(picked:) forControlEvents:UIControlEventTouchUpInside];
     // The first launch offers the redesign; the tour again from the Mod page shows the stored look.
-    BOOL redesign = glass && (SGFlag(SGKeyOnboardingSeen, NO) ? SGRedesignedUIStored() : YES);
+    BOOL redesign = SGFlag(SGKeyOnboardingSeen, NO) ? SGRedesignedUIStored() : YES;
     _redesigned.selected = redesign;
     _legacy.selected = !redesign;
-    if (!glass) {
-        [_redesigned makeUnavailable:[NSString stringWithFormat:@"Needs iOS 26. This phone runs iOS %@.", UIDevice.currentDevice.systemVersion]];
-        _legacy.enabled = NO;
-    }
     _beta = [self betaNote];
     _beta.hidden = !redesign;
 
