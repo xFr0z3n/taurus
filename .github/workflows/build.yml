@@ -1,0 +1,164 @@
+# Builds Taurus on a GitHub-hosted Mac.
+#
+# Run it by hand (Actions -> Build -> Run workflow) with a direct link to a decrypted Spotify IPA, or
+# leave the link empty and set the SPOTIFY_IPA_URL repository secret once. The finished, unsigned
+# Taurus-<version>.ipa and the tweak's .deb come back as workflow artifacts.
+#
+# Pushes and pull requests only compile the tweak, so a broken build shows up before anyone runs the
+# full thing. The flag table is generated from an IPA (scripts/extract-flags.py), so that check reads it
+# from the SG_FLAG_LIST secret if there is one
+# (gzip -9c tweak/Sources/Shared/Flags/SGFlagList.m | base64 | gh secret set SG_FLAG_LIST),
+# else from SPOTIFY_IPA_URL, else compiles against an empty placeholder table.
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: "Direct link to a decrypted Spotify 9.1.90 IPA (empty: the SPOTIFY_IPA_URL secret)"
+        required: false
+        type: string
+      flex:
+        description: "Include FLEX (the view inspector make trees reads through)"
+        default: false
+        type: boolean
+      upload_method:
+        description: "Where to put the result"
+        default: artifacts
+        type: choice
+        options: [artifacts, filebin, both]
+  push:
+    branches: [main, stable]
+    paths-ignore: ["**.md", "docs/**", "*.json", "icons/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "*.json", "icons/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  THEOS: ${{ github.workspace }}/theos
+
+jobs:
+  ipa:
+    name: IPA
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve the IPA link
+        env:
+          INPUT_URL: ${{ inputs.ipa_url }}
+          SECRET_URL: ${{ secrets.SPOTIFY_IPA_URL }}
+        run: |
+          URL="${INPUT_URL:-$SECRET_URL}"
+          [ -n "$URL" ] || { echo "::error::no IPA link: pass ipa_url or set the SPOTIFY_IPA_URL secret"; exit 1; }
+          echo "::add-mask::$URL"
+          echo "IPA_URL=$URL" >> "$GITHUB_ENV"
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: actions/checkout@v5
+        with:
+          repository: theos/theos
+          path: theos
+          submodules: recursive
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install tools
+        run: |
+          brew install make dpkg ldid
+          uv tool install --with pillow "cyan @ git+https://github.com/asdfzxcvbn/pyzule-rw"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download the IPA
+        run: |
+          mkdir -p ipa
+          curl -fsSL --retry 3 "$IPA_URL" -o ipa/spotify.ipa
+          unzip -Z1 ipa/spotify.ipa | grep -qE '^Payload/[^/]+\.app/' \
+            || { echo "::error::the link did not give an IPA"; exit 1; }
+
+      - name: Build
+        run: make ${{ inputs.flex && 'build' || 'release' }}
+
+      - name: Summary
+        run: |
+          echo "### Built" >> "$GITHUB_STEP_SUMMARY"
+          for f in out/*.ipa tweak/packages/*.deb; do
+            echo "- \`$(basename "$f")\` ($(du -h "$f" | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - uses: actions/upload-artifact@v5
+        if: inputs.upload_method != 'filebin'
+        with:
+          name: Taurus-ipa
+          path: out/*.ipa
+          if-no-files-found: error
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: Taurus-deb
+          path: tweak/packages/*.deb
+          if-no-files-found: error
+
+      - name: Upload to filebin.net
+        if: inputs.upload_method != 'artifacts'
+        run: |
+          BIN="taurus-${{ github.run_id }}"
+          echo "### filebin.net download" >> "$GITHUB_STEP_SUMMARY"
+          for f in out/*.ipa; do
+            curl -fsS -X POST -H "Content-Type: application/octet-stream" --data-binary "@$f" \
+              "https://filebin.net/$BIN/$(basename "$f")" >/dev/null
+            echo "- https://filebin.net/$BIN/$(basename "$f")" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "- _filebin deletes bins after a few days of inactivity, download promptly._" >> "$GITHUB_STEP_SUMMARY"
+
+  tweak:
+    name: Tweak compiles
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: actions/checkout@v5
+        with:
+          repository: theos/theos
+          path: theos
+          submodules: recursive
+
+      - name: Install tools
+        run: brew install make dpkg ldid
+
+      - name: Flag table
+        env:
+          SG_FLAG_LIST: ${{ secrets.SG_FLAG_LIST }}
+          SPOTIFY_IPA_URL: ${{ secrets.SPOTIFY_IPA_URL }}
+        run: |
+          OUT=tweak/Sources/Shared/Flags/SGFlagList.m
+          if [ -n "$SG_FLAG_LIST" ]; then
+            echo "$SG_FLAG_LIST" | base64 -d | gunzip > "$OUT"
+          elif [ -n "$SPOTIFY_IPA_URL" ]; then
+            curl -fsSL --retry 3 "$SPOTIFY_IPA_URL" -o "$RUNNER_TEMP/spotify.ipa"
+            python3 scripts/extract-flags.py "$RUNNER_TEMP/spotify.ipa"
+          else
+            echo "::notice::no SG_FLAG_LIST or SPOTIFY_IPA_URL secret: compiling against an empty flag table"
+            printf '#import "Flags.h"\n\nconst SGFlagDef SGFlagTable[] = {{0}};\nconst NSUInteger SGFlagCount = 0;\n' > "$OUT"
+          fi
+
+      - name: Build
+        run: env -u MAKELEVEL gmake -C tweak clean package
